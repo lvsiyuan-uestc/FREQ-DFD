@@ -1,0 +1,17 @@
+# Python cache/artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary/backup files
+*.bak
+
+# Training/inference outputs
+checkpoints/
+output*/
+output_freq/
+anomaly/
+
+# Environment and logs
+.venv/
+*.log
