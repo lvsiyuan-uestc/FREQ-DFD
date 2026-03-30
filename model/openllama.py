@@ -129,16 +129,14 @@ class OpenLLAMAPEFTModel(nn.Module):
         # -------- 视觉主干（ImageBind huge）--------
         # 注意：如果 imagebind_huge 需要额外键，可在 self.args 补齐默认值
         self.visual_encoder, self.visual_hidden_size = imagebind_model.imagebind_huge(self.args)
-        self.visual_encoder = self.visual_encoder.bfloat16()  # 主干用 bf16
-        self.dct_branch = DCTBranch(k_keep=16, hidden=64, out_dim=int(self.visual_hidden_size))
-        self.fuse_gate  = GatedFuse(dim=int(self.visual_hidden_size))
-        # -------- 频域分支 + 门控（与视觉向量同维）--------
-        # 原来：
-
+        # dtype 约定（混合精度）：
+        # 1) 视觉主干使用 bf16，降低显存/带宽开销；
+        # 2) 频域 DCT 与门控融合分支使用 fp32，避免频域能量统计与门控 logits 在低精度下抖动。
+        self.visual_encoder = self.visual_encoder.bfloat16()
 
         D = int(self.visual_hidden_size)  # 例如 1280（和 ImageBind huge 一致）
-        self.dct_branch = DCTBranch(k_keep=16, hidden=64, out_dim=D).bfloat16()
-        self.fuse_gate  = GatedFuse(dim=D).bfloat16()
+        self.dct_branch = DCTBranch(k_keep=16, hidden=64, out_dim=D).float()
+        self.fuse_gate  = GatedFuse(dim=D).float()
 
         # -------- 其余分支（保持你原有模块）--------
         self.iter        = 0
@@ -202,6 +200,28 @@ class OpenLLAMAPEFTModel(nn.Module):
 
         # 其余需要的属性
         # self.some_flag = self.args.get('some_flag', default_value)
+        self.debug_dtypes = bool(self.args.get('debug_dtypes', False))
+        if self.debug_dtypes:
+            self._validate_module_dtypes()
+
+    def _validate_module_dtypes(self):
+        """Debug 自检：打印关键模块参数 dtype，便于排查混合精度不一致。"""
+        def _module_dtype(module):
+            if module is None:
+                return "None"
+            try:
+                return str(next(module.parameters()).dtype)
+            except (StopIteration, AttributeError, TypeError):
+                return "N/A"
+
+        print("[dtype-check] visual_encoder:", _module_dtype(self.visual_encoder))
+        print("[dtype-check] dct_branch:", _module_dtype(self.dct_branch))
+        print("[dtype-check] fuse_gate:", _module_dtype(self.fuse_gate))
+        print("[dtype-check] locator:", _module_dtype(self.locator))
+        if hasattr(self, "llama_model") and self.llama_model is not None:
+            print("[dtype-check] llama_model:", _module_dtype(self.llama_model))
+        if hasattr(self, "llama_proj") and self.llama_proj is not None:
+            print("[dtype-check] llama_proj:", _module_dtype(self.llama_proj))
 
     def _init_text_prompts(self, device):
         if self.normal_sentences is not None and self.abnormal_sentences is not None:
@@ -429,11 +449,14 @@ class OpenLLAMAPEFTModel(nn.Module):
         x_rgb_01 = inputs['images']                    # (B,3,H,W) in [0,1]
         last_tokens = patch_tokens[-1] if isinstance(patch_tokens, (list, tuple)) else patch_tokens  # (B,L,1024)
         f_rgb_vec   = last_tokens.mean(dim=1) if last_tokens.dim() == 3 else last_tokens            # (B,1024)
-        with torch.cuda.amp.autocast(enabled=False):   # 频域与门控用 fp32 更稳
-            f_freq = self.dct_branch(x_rgb_01.float()) # (B, D)
-            f_rgb  = f_rgb_vec.float()  
-            fused_vis = self.fuse_gate(f_rgb, f_freq).to(f_rgb_vec.dtype)           
-            img_embeds = self.fuse_gate(f_rgb, f_freq).to(img_embeds.dtype)  # (B, D)
+        with torch.cuda.amp.autocast(enabled=False):   # 频域与门控固定 fp32，避免隐式 dtype 转换
+            dct_dtype = next(self.dct_branch.parameters()).dtype
+            fuse_dtype = next(self.fuse_gate.parameters()).dtype
+            x_freq_in = x_rgb_01.to(dtype=dct_dtype)
+            f_rgb = f_rgb_vec.to(dtype=fuse_dtype)
+            f_freq = self.dct_branch(x_freq_in).to(dtype=fuse_dtype)  # (B, D)
+            fused_vis = self.fuse_gate(f_rgb, f_freq)
+            img_embeds = fused_vis.to(img_embeds.dtype)  # 回到视觉主干/LLM 路径 dtype
         # =============================================
 
         class_name = inputs['class_names']
