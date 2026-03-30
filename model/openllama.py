@@ -28,21 +28,15 @@ except Exception:
 
 
 CLASS_NAMES=['face','object']
-normal_sentences_all = []
-abnormal_sentences_all = []
-normal_sentences_all.append(data.load_and_transform_text('real', torch.cuda.current_device()))
-abnormal_sentences_all.append(data.load_and_transform_text('fake', torch.cuda.current_device()))
 
-def encode_text_with_prompt_ensemble(model, obj, device, ctx):
-    global normal_sentences_all,abnormal_sentences_all
-    normal_sentences = torch.cat(normal_sentences_all).to(device)
-    abnormal_sentences = torch.cat(abnormal_sentences_all).to(device)
+def encode_text_with_prompt_ensemble(model, normal_sentences, abnormal_sentences, device, ctx):
     with torch.no_grad():
         class_embeddings_normal = model({ModalityType.TEXT: normal_sentences})[ModalityType.TEXT][0]
         class_embeddings_abnormal = model({ModalityType.TEXT: abnormal_sentences})[ModalityType.TEXT][0]
 
-    class_embeddings_normal=torch.cat((ctx.cuda(),class_embeddings_normal),dim=0)
-    class_embeddings_abnormal=torch.cat((ctx.cuda(),class_embeddings_abnormal),dim=0)
+    ctx_on_device = ctx.to(device)
+    class_embeddings_normal=torch.cat((ctx_on_device,class_embeddings_normal),dim=0)
+    class_embeddings_abnormal=torch.cat((ctx_on_device,class_embeddings_abnormal),dim=0)
 
     class_embeddings_normal = class_embeddings_normal.unsqueeze(0)
     class_embeddings_normal = class_embeddings_normal.mean(dim=1, keepdim=True)
@@ -156,6 +150,9 @@ class OpenLLAMAPEFTModel(nn.Module):
         ctx_vectors = torch.empty(16, 1024)
         nn.init.normal_(ctx_vectors, std=0.02)
         self.ctx = nn.Parameter(ctx_vectors).bfloat16()
+        self.normal_sentences = None
+        self.abnormal_sentences = None
+        self._init_text_prompts(self.device)
 
         # -------- LLM（Vicuna，本地加载）--------
         enable_llm = bool(self.args.get('enable_llm', True))
@@ -205,6 +202,19 @@ class OpenLLAMAPEFTModel(nn.Module):
 
         # 其余需要的属性
         # self.some_flag = self.args.get('some_flag', default_value)
+
+    def _init_text_prompts(self, device):
+        if self.normal_sentences is not None and self.abnormal_sentences is not None:
+            return
+
+        normal_sentences = data.load_and_transform_text('real', device)
+        abnormal_sentences = data.load_and_transform_text('fake', device)
+        if isinstance(normal_sentences, (list, tuple)):
+            normal_sentences = torch.cat(normal_sentences)
+        if isinstance(abnormal_sentences, (list, tuple)):
+            abnormal_sentences = torch.cat(abnormal_sentences)
+        self.normal_sentences = normal_sentences.to(device)
+        self.abnormal_sentences = abnormal_sentences.to(device)
 
 
     def encode_image(self, image_paths):
@@ -428,7 +438,7 @@ class OpenLLAMAPEFTModel(nn.Module):
 
         class_name = inputs['class_names']
         feats_text_tensor = encode_text_with_prompt_ensemble(
-            self.visual_encoder, class_name, self.device, self.ctx
+            self.visual_encoder, self.normal_sentences, self.abnormal_sentences, self.device, self.ctx
         )
 
         anomaly_maps = []
@@ -495,7 +505,9 @@ class OpenLLAMAPEFTModel(nn.Module):
                 c_name = name
                 break
         image_embeds, _, patch_tokens = self.encode_image_for_web_demo(inputs['image_paths'],img_tensor)
-        feats_text_tensor = encode_text_with_prompt_ensemble(self.visual_encoder, [c_name], self.device,self.ctx)
+        feats_text_tensor = encode_text_with_prompt_ensemble(
+            self.visual_encoder, self.normal_sentences, self.abnormal_sentences, self.device, self.ctx
+        )
         
         anomaly_maps = []
         if img_tensor is None:
