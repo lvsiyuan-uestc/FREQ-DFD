@@ -161,3 +161,16 @@ sample: video_101/000123.png | fakeprob=0.873 | pred=1
 ---
 
 如需一键运行最常见流程，请直接查看并修改 `scripts/quickstart.sh` 中的路径变量。
+
+## 10. 仓库清洁规范
+
+为保持仓库可复现、可审查，请不要提交以下文件：
+
+- Python 缓存与编译产物：`__pycache__/`、`*.pyc`、`*.pyo`
+- 临时备份文件：`*.bak`（例如 `model/openllama.py.bak`）
+- 训练/推理产物目录：`checkpoints/`、`output*/`、`output_freq/`、`anomaly/`
+- 本地虚拟环境与日志：`.venv/`、`*.log`
+
+建议：
+- 历史代码请通过 `git commit` 保留，不要在工作区保留 `.bak` 备份。
+- 提交前执行 `git status`，确认仅包含源码与必要文档变更。
