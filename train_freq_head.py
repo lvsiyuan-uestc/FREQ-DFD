@@ -27,20 +27,29 @@ class FrameDataset(Dataset):
         self.items = []
         if isinstance(real_roots, (str, Path)): real_roots = [real_roots]
         if isinstance(fake_roots, (str, Path)): fake_roots = [fake_roots]
+
         for root in real_roots:
             r = Path(root)
-            for p in sorted(r.iterdir()):
-                if p.is_dir():
-                    for x in sorted(p.iterdir()):
-                        if x.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
-                            self.items.append((str(x), 0))
+            if not r.exists():
+                raise FileNotFoundError(f"real root does not exist: {r}")
+            for x in sorted(r.rglob("*")):
+                if x.is_file() and x.suffix.lower() in IMG_EXTS:
+                    video_id = x.parent.name
+                    self.items.append((str(x), 0, video_id))
+
         for root in fake_roots:
             r = Path(root)
-            for p in sorted(r.iterdir()):
-                if p.is_dir():
-                    for x in sorted(p.iterdir()):
-                        if x.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
-                            self.items.append((str(x), 1))
+            if not r.exists():
+                raise FileNotFoundError(f"fake root does not exist: {r}")
+            for x in sorted(r.rglob("*")):
+                if x.is_file() and x.suffix.lower() in IMG_EXTS:
+                    video_id = x.parent.name
+                    self.items.append((str(x), 1, video_id))
+
+        if len(self.items) == 0:
+            raise RuntimeError(
+                f"FrameDataset is empty. Checked real_roots={list(real_roots)}, fake_roots={list(fake_roots)}"
+            )
         self.size = size
 
 
@@ -48,7 +57,7 @@ class FrameDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
-        path, y = self.items[i]
+        path, y, _video_id = self.items[i]
         im = Image.open(path).convert("RGB").resize((self.size, self.size))
         arr = np.asarray(im, dtype="float32") / 255.0  # [0,1]
         t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()  # (3,H,W)
